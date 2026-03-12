@@ -1,19 +1,17 @@
-// Hayase Anilibria Extension v1.9 — seeders >=0, score >=7, больше логов seeders
+// Hayase Anilibria Extension v2.3 — поиск релиза → торренты по /release/{id}
 
 export default {
   async test() {
     try {
-      const res = await fetch('https://anilibria.top/api/v1/anime/torrents?page=1');
-      console.log('[Anilibria TEST] Status:', res.status);
+      const res = await fetch('https://anilibria.top/api/v1/app/search/releases?query=test');
       return res.ok;
-    } catch (err) {
-      console.error('[Anilibria TEST] Ошибка:', err.message);
-      throw err;
+    } catch {
+      return false;
     }
   },
 
   async single(query) { return await searchTorrents(query, false); },
-  async batch(query)  { return await searchTorrents(query, true);  },
+  async batch(query)  { return await searchTorrents(query, true); },
   async movie(query)  { return await searchTorrents(query, false); },
 
   async query() { return undefined; }
@@ -22,115 +20,121 @@ export default {
 async function searchTorrents(query, isBatch = false) {
   const fetch = query.fetch;
 
-  if (!query.titles?.length) return [];
+  if (!query.titles?.length) {
+    console.log('[Anilibria] Нет названий для поиска');
+    return [];
+  }
 
   console.log('[Anilibria] Названия из Hayase:', query.titles);
   console.log('[Anilibria] Эпизод:', query.episode ?? 'не указан');
 
-  // Кандидаты: eng/romaji первыми
-  const engRomaji = query.titles
-    .filter(t => !/[\u0400-\u04FFёЁ]/.test(t) && t.length > 5)
-    .map(t => t.toLowerCase().trim().replace(/[:?!\.,]/g, ''));
+  // Предпочитаем русское название → английское/ромадзи
+  const candidates = [
+    ...query.titles.filter(t => /[\u0400-\u04FFёЁ]/.test(t)),
+    ...query.titles
+  ];
 
-  const rus = query.titles
-    .filter(t => /[\u0400-\u04FFёЁ]/.test(t))
-    .map(t => t.toLowerCase().trim().replace(/[:?!\.,]/g, ''));
+  let releaseId = null;
+  let releaseName = '';
+  let releaseAlias = '';
 
-  const candidates = [...engRomaji, ...rus];
+  // Ищем релиз по одному из названий
+  for (const term of candidates) {
+    if (!term?.trim()) continue;
 
-  console.log('[Anilibria] Кандидаты поиска (eng первыми):', candidates);
+    const clean = term.trim().replace(/[:?!\.,]/g, '');
+    console.log('[Anilibria] Пробуем поиск релиза по:', clean);
 
-  const results = [];
-  const maxPages = 8;
-
-  for (let page = 1; page <= maxPages; page++) {
     try {
-      const url = `https://anilibria.top/api/v1/anime/torrents?page=${page}`;
+      const url = `https://anilibria.top/api/v1/app/search/releases?query=${encodeURIComponent(clean)}`;
       const res = await fetch(url);
-      if (!res.ok) break;
+      if (!res.ok) continue;
 
       const data = await res.json();
-      const items = data?.data || [];
-
-      console.log('[Anilibria] Страница', page, 'элементов:', items.length);
-
-      for (const item of items) {
-        const release = item.release || {};
-        const names = release.name || {};
-        const mainLower = (names.main || '').toLowerCase().replace(/[:?!\.,]/g, '');
-        const engLower = (names.english || '').toLowerCase().replace(/[:?!\.,]/g, '');
-        const aliasLower = (release.alias || '').toLowerCase();
-
-        let bestScore = 0;
-        let matchedBy = '';
-
-        for (const term of candidates) {
-          if (term.length < 5) continue;
-
-          let score = 0;
-          if (mainLower === term || engLower === term || aliasLower === term) { score = 10; matchedBy = 'exact'; }
-          else if (mainLower.startsWith(term) || engLower.startsWith(term)) { score = 9; matchedBy = 'startsWith'; }
-          else if (mainLower.includes(term) || engLower.includes(term)) { score = 7; matchedBy = 'includes'; }
-          else if (aliasLower.includes(term.replace(/ /g, '-'))) { score = 6; matchedBy = 'alias'; }
-
-          if ((term.includes('kimetsu') || term.includes('yaiba') || term.includes('slayer') || term.includes('демон')) &&
-              (mainLower.includes('kimetsu') || engLower.includes('kimetsu') || mainLower.includes('демон') || engLower.includes('demon'))) {
-            score = Math.max(score, 8);
-            matchedBy += ' + demon-slayer-boost';
-          }
-
-          if (score > bestScore) bestScore = score;
-        }
-
-        if (bestScore < 7) continue;
-
-        const seed = item.seeders || 0;
-        console.log('[Anilibria] Совпадение (score ' + bestScore + ', by ' + matchedBy + ') на стр. ' + page + ': ' + (names.main || names.english || release.alias) + ' | seeders: ' + seed + ' | magnet: ' + (item.magnet ? 'yes' : 'no'));
-
-        const targetEp = Number(query.episode) || 1;
-        const epDesc = item.description || '';
-
-        const matchesEp = !query.episode ||
-          epDesc.includes(targetEp.toString()) ||
-          epDesc.includes(`-${targetEp}`) ||
-          epDesc.includes(`${targetEp}-`) ||
-          (isBatch && epDesc.includes('-') && epDesc.split('-').length > 1);
-
-        if (matchesEp) {
-          const magnet = item.magnet;
-          if (!magnet || !magnet.startsWith('magnet:?')) continue;
-
-          results.push({
-            title: `${names.main || names.english || release.alias || '—'} | ${item.quality?.value || '?'} | ${epDesc || '—'} (seeders: ${seed})`,
-            link: magnet,
-            id: item.id || item.hash,
-            seeders: seed,
-            leechers: item.leechers || 0,
-            downloads: item.completed_times || 0,
-            accuracy: 'medium',
-            hash: item.hash,
-            size: item.size || 0,
-            date: item.created_at ? new Date(item.created_at) : null,
-            type: isBatch ? 'batch' : '',
-            score: bestScore
-          });
-        }
+      if (data?.length > 0) {
+        const rel = data[0];
+        releaseId = rel.id;
+        releaseName = rel.name?.main || rel.name?.english || rel.alias || clean;
+        releaseAlias = rel.alias || '';
+        console.log('[Anilibria] Нашёл релиз → id:', releaseId, 'alias:', releaseAlias, 'name:', releaseName);
+        break;
       }
-
-      if (items.length < 25) break;
     } catch (err) {
-      console.error('[Anilibria] Ошибка стр. ' + page + ':', err.message);
-      break;
+      console.log('[Anilibria] Ошибка при поиске по "' + clean + '":', err.message);
     }
   }
 
-  results.sort((a, b) => b.score - a.score || b.seeders - a.seeders);
+  if (!releaseId) {
+    console.log('[Anilibria] Ни один релиз не найден');
+    return [];
+  }
 
-  console.log('[Anilibria] Итого подходящих:', results.length);
+  // Получаем торренты именно этого релиза
+  const results = [];
+
+  try {
+    const torrentsUrl = `https://anilibria.top/api/v1/anime/torrents/release/${releaseId}`;
+    const res = await fetch(torrentsUrl);
+    if (!res.ok) {
+      console.log('[Anilibria] Торренты не получены, статус:', res.status);
+      return [];
+    }
+
+    const torrentsData = await res.json();
+    const torrents = torrentsData || [];  // массив объектов
+
+    console.log('[Anilibria] Получено торрентов для релиза:', torrents.length);
+
+    const targetEp = Number(query.episode) || 1;
+
+    for (const tor of torrents) {
+      const epDesc = tor.description || tor.series || '—';
+
+      // Проверка эпизода (мягкая)
+      let matchesEp = !query.episode; // если эпизод не указан — берём все
+      if (query.episode) {
+        if (epDesc.includes(targetEp.toString()) ||
+            epDesc.includes(`-${targetEp}`) ||
+            epDesc.includes(`${targetEp}-`) ||
+            epDesc.includes(`[${targetEp}]`)) {
+          matchesEp = true;
+        } else if (epDesc.includes('-')) {
+          const [start, end] = epDesc.split('-').map(n => parseInt(n.trim(), 10));
+          if (!isNaN(start) && !isNaN(end) && targetEp >= start && targetEp <= end) {
+            matchesEp = true;
+          }
+        }
+      }
+
+      if (matchesEp) {
+        const magnet = tor.magnet;
+        if (!magnet || !magnet.startsWith('magnet:?')) continue;
+
+        results.push({
+          title: `${releaseName} | ${tor.quality?.value || tor.type?.description || '?'} | ${epDesc} (seeders: ${tor.seeders || 0})`,
+          link: magnet,
+          id: tor.id || tor.hash,
+          seeders: tor.seeders || 0,
+          leechers: tor.leechers || 0,
+          downloads: tor.completed_times || 0,
+          accuracy: 'high',
+          hash: tor.hash,
+          size: tor.size || 0,
+          date: tor.created_at ? new Date(tor.created_at) : null,
+          type: isBatch ? 'batch' : ''
+        });
+      }
+    }
+  } catch (err) {
+    console.error('[Anilibria] Ошибка при получении торрентов по id:', err.message);
+  }
+
+  // Сортировка по seeders descending
+  results.sort((a, b) => b.seeders - a.seeders);
+
+  console.log('[Anilibria] Итого подходящих торрентов:', results.length);
   if (results.length > 0) {
-    console.log('[Anilibria] Список найденных:', results.map(r => r.title + ' (score ' + r.score + ', seeders ' + r.seeders + ')').join('\n'));
-  } else {
-    console.log('[Anilibria] Ничего не нашлось — попробуй увеличить maxPages или проверить seeders в API');
+    console.log('[Anilibria] Список:\n' + results.map(r => r.title).join('\n'));
   }
 
   return results;
