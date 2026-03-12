@@ -1,0 +1,9 @@
+{
+  "id": "anilibria",
+  "name": "AniLibria",
+  "version": "1.0.0",
+  "type": "video",
+  "script": "anilibria.js",
+  "description": "AniLibria streaming source for Hayase",
+  "nsfw": false
+}
