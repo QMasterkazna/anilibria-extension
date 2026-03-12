@@ -1,9 +1,17 @@
-{
-  "id": "anilibria",
-  "name": "AniLibria",
-  "version": "1.0.0",
-  "type": "video",
-  "script": "anilibria.js",
-  "description": "AniLibria streaming source for Hayase",
-  "nsfw": false
-}
+[
+  {
+    "name": "Anilibria.top",
+    "id": "anilibria",
+    "version": "1.0.0",
+    "type": "torrent",
+    "accuracy": "medium",
+    "ratio": 0,
+    "media": "both",
+    "languages": ["RU"],
+    "url": "aHR0cHM6Ly9hcGkuYW5pbGli cmlhLnR2",
+    "icon": "https://anilibria.top/favicon.ico",
+    "update": "https://raw.githubusercontent.com/QMasterkazna/hayase-anilibria-extension/main/manifest.json",
+    "code": "https://raw.githubusercontent.com/QMasterkazna/hayase-anilibria-extension/main/index.js",
+    "options": {}
+  }
+]
