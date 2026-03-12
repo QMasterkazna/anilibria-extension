@@ -1,13 +1,12 @@
-// Hayase Anilibria Extension v1.1 (улучшенный поиск)
-// 2026 версия — поиск по всем названиям + русский приоритет
+// Hayase Anilibria Extension v1.2 — 2026, новая API база anilibria.top/v1
 
 export default {
   async test() {
     try {
-      const res = await fetch('https://api.anilibria.tv/v3/title/random');
+      const res = await fetch('https://api.anilibria.top/v1/title/random');
       return res.ok;
     } catch (err) {
-      throw new Error('Не удалось подключиться к Anilibria API');
+      throw new Error('Anilibria API недоступен (проверь https://api.anilibria.top/v1)');
     }
   },
 
@@ -21,109 +20,106 @@ export default {
 async function searchTorrents(query, isBatch = false) {
   const fetch = query.fetch;
 
-  if (!query.titles || query.titles.length === 0) {
-    console.log('[Anilibria] Нет названий в query');
+  if (!query.titles?.length) {
+    console.log('[Anilibria] Нет названий для поиска');
     return [];
   }
 
-  console.log('[Anilibria] Полученные названия:', query.titles);
-  console.log('[Anilibria] Ищем эпизод:', query.episode || 'не указан');
+  console.log('[Anilibria v1] Названия из Hayase:', query.titles);
+  console.log('[Anilibria v1] Эпизод:', query.episode ?? 'не указан');
 
-  // Пробуем все названия по очереди, приоритет — с кириллицей
-  const titleCandidates = [
-    ...query.titles.filter(t => /[\u0400-\u04FF]/.test(t)), // русские первыми
+  // Русские названия первыми, потом все остальные
+  const candidates = [
+    ...query.titles.filter(t => /[\u0400-\u04FFёЁ]/.test(t)),
     ...query.titles
   ];
 
-  let anime = null;
-  let usedSearchTerm = '';
+  let foundAnime = null;
+  let usedTerm = '';
 
-  for (const term of titleCandidates) {
-    if (!term.trim()) continue;
+  for (const term of candidates) {
+    if (!term?.trim()) continue;
+
+    console.log('[Anilibria v1] Поиск по термину:', term);
 
     try {
-      console.log('[Anilibria] Пробуем поиск по:', term);
+      const url = `https://api.anilibria.top/v1/title/search?search=${encodeURIComponent(term)}&limit=5`;
+      const res = await fetch(url);
 
-      const res = await fetch(
-        `https://api.anilibria.tv/v3/title/search?search=${encodeURIComponent(term)}&limit=6&filter=id,names,code,player,torrents`
-      );
-
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.log('[Anilibria v1] Ответ не OK:', res.status, await res.text().catch(() => ''));
+        continue;
+      }
 
       const data = await res.json();
-      if (!data?.list?.length) continue;
 
-      // Берём первый подходящий тайтл
-      anime = data.list[0];
-      usedSearchTerm = term;
-      console.log('[Anilibria] Нашёл тайтл:', anime.names?.ru || anime.names?.en || anime.code);
-      break;
-    } catch (e) {
-      console.log('[Anilibria] Ошибка при поиске по "' + term + '":', e.message);
+      if (data?.list?.length > 0) {
+        foundAnime = data.list[0];
+        usedTerm = term;
+        console.log('[Anilibria v1] Нашёл тайтл:', foundAnime?.names?.ru || foundAnime?.names?.en || foundAnime?.code);
+        break;
+      }
+    } catch (err) {
+      console.log('[Anilibria v1] Ошибка поиска по "' + term + '":', err.message);
     }
   }
 
-  // Последний fallback — если ничего не нашлось, берём первое слово из первого названия
-  if (!anime && query.titles[0]) {
-    const fallbackTerm = query.titles[0].split(' ')[0];
-    console.log('[Anilibria] Fallback поиск по:', fallbackTerm);
-
+  // Если ничего — fallback на первое слово
+  if (!foundAnime && query.titles[0]) {
+    const fbTerm = query.titles[0].split(/[ ,:;()]+/)[0];
+    console.log('[Anilibria v1] Fallback по слову:', fbTerm);
     try {
-      const res = await fetch(
-        `https://api.anilibria.tv/v3/title/search?search=${encodeURIComponent(fallbackTerm)}&limit=3&filter=id,names,code,torrents`
-      );
+      const res = await fetch(`https://api.anilibria.top/v1/title/search?search=${encodeURIComponent(fbTerm)}&limit=3`);
       const data = await res.json();
       if (data?.list?.length) {
-        anime = data.list[0];
-        usedSearchTerm = fallbackTerm;
+        foundAnime = data.list[0];
+        usedTerm = fbTerm;
       }
     } catch {}
   }
 
-  if (!anime || !anime.torrents?.list?.length) {
-    console.log('[Anilibria] Не нашёл тайтл или торренты');
+  if (!foundAnime || !foundAnime.torrents?.list?.length) {
+    console.log('[Anilibria v1] Торренты не найдены для тайтла', foundAnime?.code || '—');
     return [];
   }
 
   const results = [];
-  const targetEp = query.episode || 1;
+  const targetEp = Number(query.episode) || 1;
 
-  for (const tor of anime.torrents.list) {
-    const eps = tor.episodes || {};
-    const epFrom = eps.first ?? 0;
-    const epTo   = eps.last  ?? epFrom;
-    const epStr  = eps.string || '';
+  for (const tor of foundAnime.torrents.list || []) {
+    // Поля могут быть series / episodes / string / range — берём что есть
+    const epInfo = tor.series || tor.episodes?.string || tor.episodes_range || '';
+    const epFrom = tor.episodes?.first ?? 0;
+    const epTo   = tor.episodes?.last ?? epFrom;
 
-    // Более мягкая проверка эпизода
-    const matches = 
+    const matchesEp = !query.episode || 
       (targetEp >= epFrom && targetEp <= epTo) ||
-      epStr.includes(targetEp.toString()) ||
-      epStr.includes(`${targetEp}`) ||
-      (isBatch && (epTo - epFrom > 1 || epStr.includes('-')));
+      epInfo.includes(targetEp.toString()) ||
+      epInfo.includes(` ${targetEp} `) ||
+      epInfo.includes(`[${targetEp}]`) ||
+      (isBatch && (epTo > epFrom + 1 || epInfo.includes('-') || epInfo.includes('–')));
 
-    if (matches || !query.episode) {  // если эпизод не указан — берём все
-      const magnet = tor.magnet;
-      const torrentUrl = tor.url ? `https://api.anilibria.tv${tor.url}` : null;
-      const link = magnet || torrentUrl;
+    if (matchesEp) {
+      const link = tor.magnet || (tor.url ? `https://api.anilibria.top${tor.url}` : null);
 
-      if (!link) continue;
-
-      results.push({
-        title: `${anime.names?.ru || anime.names?.en || anime.code} | ${tor.quality?.string || 'unknown'} | ${epStr || tor.series || '—'}`,
-        link: link,
-        id: tor.torrent_id || tor.hash,
-        seeders: tor.seeders || 0,
-        leechers: tor.leechers || 0,
-        downloads: tor.downloads || 0,
-        accuracy: 'medium',
-        hash: tor.hash,
-        size: tor.total_size || tor.size_bytes || 0,
-        date: tor.uploaded_timestamp ? new Date(tor.uploaded_timestamp * 1000) : null,
-        type: isBatch ? 'batch' : ''
-      });
+      if (link) {
+        results.push({
+          title: `${foundAnime.names?.ru || foundAnime.names?.en || foundAnime.code} | ${tor.quality?.string || tor.quality || '?'} | ${epInfo || tor.series || tor.episodes?.string || '—'}`,
+          link,
+          id: tor.id || tor.hash || tor.torrent_id,
+          seeders: tor.seeders || 0,
+          leechers: tor.leechers || 0,
+          downloads: tor.downloads || 0,
+          accuracy: 'medium',
+          hash: tor.hash,
+          size: tor.total_size || tor.size || 0,
+          date: tor.time ? new Date(tor.time * 1000) : null,
+          type: isBatch ? 'batch' : ''
+        });
+      }
     }
   }
 
-  console.log('[Anilibria] Найдено торрентов:', results.length);
+  console.log('[Anilibria v1] Результатов:', results.length);
   return results;
 }
