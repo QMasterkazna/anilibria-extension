@@ -1,96 +1,186 @@
-const API = "https://api.anilibria.top/v1";
-const BASE_VIDEO = "https://cache.libria.fun";
+// anilibria-hayase-extension.js
+// Версия: 2026-03
+// Hayase extension для Anilibria.tv (прямые ссылки без торрентов)
 
-/**
- * Поиск аниме
- */
-async function search(query) {
+const BASE_URL = "https://api.anilibria.tv/v1";
+const PLAYER_BASE = "https://vk.com/video_ext.php?oid=-"; // часто используется, но лучше брать из API
+
+export default {
+  name: "Anilibria",
+  description: "Прямой просмотр аниме с Anilibria.tv через официальное API",
+  version: "1.0.1",
+  author: "anonymous helper",
+  icon: "https://anilibria.tv/favicon.ico",
+  language: "ru",
+  nsfw: false,
+
+  // Поиск аниме
+  async search(query, page = 1) {
     try {
-        const res = await fetch(`${API}/catalog?search=${encodeURIComponent(query)}`);
-        const data = await res.json();
-        if (!data.items) return [];
+      const limit = 20;
+      const offset = (page - 1) * limit;
 
-        return data.items.map(a => ({
-            id: a.id,
-            title: a.names?.ru || a.names?.en || "Unknown",
-            image: a.poster?.original || "",
-            description: a.description || ""
-        }));
+      const params = new URLSearchParams({
+        search: query,
+        limit,
+        offset,
+        include: "names,description,player,playlist",
+      });
+
+      const res = await fetch(`${BASE_URL}/title?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+
+      return {
+        results: data.list.map(item => ({
+          id: item.id.toString(),
+          title: item.names?.ru || item.names?.en || "Без названия",
+          altTitles: [
+            item.names?.en,
+            item.names?.alternative,
+            item.names?.pretty
+          ].filter(Boolean),
+          poster: item.player?.playlist?.[0]?.preview || item.player?.playlist?.[0]?.screenshot || "",
+          type: item.type?.full_string || item.type?.code || "TV",
+          year: item.year || null,
+          status: item.status?.string || null,
+          episodes: item.player?.playlist?.length || item.player?.series?.length || 0,
+          description: item.description || "",
+          genres: item.genres || [],
+          rating: item.favorite?.rating || null,
+          url: `https://anilibria.tv/release/${item.code}.html`,
+        })),
+        hasMore: data.pagination?.has_next || data.list.length === limit,
+      };
     } catch (e) {
-        console.error("Search error:", e);
-        return [];
+      console.error("Anilibria search error:", e);
+      return { results: [], hasMore: false, error: e.message };
     }
-}
+  },
 
-/**
- * Детали аниме
- */
-async function details(id) {
+  // Получить полную информацию об аниме
+  async getAnimeInfo(id) {
     try {
-        const res = await fetch(`${API}/anime/${id}`);
-        const data = await res.json();
+      const res = await fetch(`${BASE_URL}/title?id=${id}&include=playlist,player,names,description,genres,year,status`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
+      const data = await res.json();
+      const title = data.list?.[0] || data;
+
+      if (!title?.id) throw new Error("Аниме не найдено");
+
+      const episodes = (title.player?.playlist || []).map((ep, index) => {
+        const epNum = ep.episode || (index + 1);
         return {
-            id: data.id,
-            title: data.names?.ru || data.names?.en || "Unknown",
-            image: data.poster?.original || "",
-            description: data.description || "",
-            status: data.status
+          id: `${title.id}-${epNum}`,
+          number: epNum,
+          title: ep.episode_name || `Серия ${epNum}`,
+          url: null, // заполним в getEpisodeSources
+          preview: ep.preview || ep.screenshot || title.player?.playlist?.[0]?.preview,
         };
-    } catch (e) {
-        console.error("Details error:", e);
-        return {};
-    }
-}
+      });
 
-/**
- * Список эпизодов
- */
-async function episodes(id) {
+      return {
+        id: title.id.toString(),
+        title: title.names?.ru || title.names?.en || "Без названия",
+        poster: title.player?.playlist?.[0]?.preview || "",
+        banner: title.player?.playlist?.[0]?.screenshot || "",
+        description: title.description || "Описание отсутствует",
+        year: title.year,
+        type: title.type?.full_string || title.type?.code,
+        status: title.status?.string || title.status?.code,
+        episodesCount: episodes.length,
+        episodes,
+        genres: title.genres || [],
+        voices: title.player?.playlist?.[0]?.host ? [title.player.playlist[0].host] : [],
+        url: `https://anilibria.tv/release/${title.code}.html`,
+      };
+    } catch (e) {
+      console.error("Anilibria getInfo error:", e);
+      return { error: e.message };
+    }
+  },
+
+  // Получить источники для серии (видеопоток)
+  async getEpisodeSources(animeId, episodeId) {
     try {
-        const res = await fetch(`${API}/anime/${id}`);
-        const data = await res.json();
+      // episodeId обычно в формате "animeId-epNumber"
+      const [, episodeNum] = episodeId.split("-").map(Number);
+      if (!episodeNum) throw new Error("Неверный episodeId");
 
-        if (!data.player?.list) return [];
+      const res = await fetch(`${BASE_URL}/title?id=${animeId}&include=playlist`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        return Object.keys(data.player.list).map(epNum => ({
-            id: `${id}_${epNum}`,
-            title: `Episode ${epNum}`,
-            number: parseInt(epNum)
-        })).sort((a, b) => a.number - b.number);
+      const data = await res.json();
+      const title = data.list?.[0] || data;
+
+      const playlist = title.player?.playlist || [];
+      const episode = playlist.find(ep => 
+        Number(ep.episode) === episodeNum ||
+        ep.episode === episodeNum.toString()
+      );
+
+      if (!episode) throw new Error(`Серия ${episodeNum} не найдена`);
+
+      // Anilibria отдаёт разные качества в объекте series
+      const sources = [];
+
+      // Самое частое — это hls в playlist или series
+      if (episode.hls) {
+        sources.push({
+          url: episode.hls,
+          quality: "Auto (HLS)",
+          type: "hls",
+          isM3U8: true,
+        });
+      }
+
+      // Прямые mp4 ссылки по качеству
+      ["fhd", "hd", "sd", "fullhd"].forEach(q => {
+        if (episode.series?.[q]) {
+          sources.push({
+            url: episode.series[q],
+            quality: q.toUpperCase(),
+            type: "mp4",
+          });
+        }
+      });
+
+      // Если ничего нет — берём самый первый доступный файл
+      if (sources.length === 0 && episode.url) {
+        sources.push({
+          url: episode.url,
+          quality: "Auto",
+          type: episode.url.includes(".m3u8") ? "hls" : "mp4",
+        });
+      }
+
+      if (sources.length === 0) {
+        throw new Error("Не удалось найти видеопоток");
+      }
+
+      return {
+        sources,
+        subtitles: [], // Anilibria обычно вшивает субтитры
+        intro: null,
+        preferred: 0, // можно выбрать лучший по качеству
+      };
     } catch (e) {
-        console.error("Episodes error:", e);
-        return [];
+      console.error("Anilibria sources error:", e);
+      return { sources: [], error: e.message };
     }
-}
+  },
 
-/**
- * Получение ссылки на поток
- */
-async function stream(epId) {
-    try {
-        const [id, epNum] = epId.split("_");
-        const res = await fetch(`${API}/anime/${id}`);
-        const data = await res.json();
+  // Опционально — можно добавить getPopular, getLatest и т.д.
+  async getPopular(page = 1) {
+    // Можно использовать /title?sort=1 (популярность) или /title/random
+    // Для простоты оставим заглушку
+    return { results: [], hasMore: false };
+  },
 
-        const file = data.player?.list?.[epNum];
-        if (!file) return [];
-
-        const url = file.hls?.startsWith("http") ? file.hls : `${BASE_VIDEO}${file.hls}`;
-
-        return [{
-            quality: file.resolution || "720p",
-            url
-        }];
-    } catch (e) {
-        console.error("Stream error:", e);
-        return [];
-    }
-}
-
-module.exports = {
-    search,
-    details,
-    episodes,
-    stream
+  // Hayase может ожидать этот метод
+  async getLatest() {
+    return this.getPopular();
+  }
 };
